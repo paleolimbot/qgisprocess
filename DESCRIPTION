@@ -33,6 +33,12 @@ Imports:
 URL: https://github.com/paleolimbot/qgisprocess
 BugReports: https://github.com/paleolimbot/qgisprocess/issues
 Suggests: 
+    knitr,
     testthat,
+    raster,
+    rgdal,
     sf,
-    raster
+    spDataLarge
+Remotes:
+    nowosad/spDataLarge
+VignetteBuilder: knitr

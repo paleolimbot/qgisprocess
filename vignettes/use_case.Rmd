@@ -1,0 +1,162 @@
+---
+title: "2. Use case: predicting plant species richness on Mt. Mongón"
+author: "Jannes Muenchow"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{"2. Use case: predicting plant species richness on Mt. Mongón"}
+  %\VignetteEngine{knitr::knitr}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r sinkremoval, eval=FALSE}
+library("raster")
+library("dplyr")
+library("qgisprocess")
+data(dem, package = "spDataLarge")
+projection(dem) = sf::st_crs(32717)$proj4string
+qgis_arguments("saga:sinkremoval")
+out = qgis_run_algorithm(
+  algorithm = "saga:sinkremoval",
+  DEM = dem, 
+  METHOD = 1, 
+  DEM_PREPROC = file.path(tempdir(), "sdem.sdat")
+  )
+
+sdem = raster(qgis_output(out, "DEM_PREPROC")[1])
+qgis_show_help("saga:sagawetnessindex")
+out = qgis_run_algorithm(
+  algorithm = "saga:sagawetnessindex",
+  DEM = file.path(tempdir(), "sdem.sdat"),
+  SLOPE_TYPE = 1, 
+  AREA_TYPE = 0,
+  SLOPE = file.path(tempdir(), "cslope.sdat"),
+  AREA = file.path(tempdir(), "carea.sdat"),
+  AREA_MOD = file.path(tempdir(), "area_mod.sdat"),
+  TWI = file.path(tempdir(), "twi.sdat")
+  )
+cslope = raster(qgis_output(out, "SLOPE")[1])
+carea = raster(qgis_output(out, "AREA")[1])
+plot(stack(cslope, carea))
+cslope = cslope * 180 /pi
+log_carea = log(carea / 1e+06)
+
+## ------------------------------------------------------------------------
+data("ndvi", package = "spDataLarge")
+projection(ndvi) = projection(carea)
+
+algs = qgis_algorithms()
+filter(algs, grepl("value", algorithm_title)) %>% as.data.frame
+qgisprocess::qgis_show_help("saga:addrastervaluestopoints")
+qgis_arguments("saga:addrastervaluestopoints")
+
+data(random_points, package = "spDataLarge")
+out = qgis_run_algorithm("saga:addrastervaluestopoints",
+                         SHAPES = random_points,
+                         GRIDS = file.path(tempdir(), "cslope.sdat"),
+                         GRIDS = file.path(tempdir(), "carea.sdat"),
+                         RESAMPLING = 0,
+                         RESULT = file.path(tempdir(), "vals.shp"))
+vals = read_sf(qgis_output(out, "RESULT"))
+```
+<!--
+## ------------------------------------------------------------------------
+get_usage("saga:sinkremoval")
+run_qgis(alg = "saga:sinkremoval",
+         DEM = dem, 
+         METHOD = "[1] Fill Sinks", 
+         DEM_PREPROC = file.path(tempdir(), "sdem.sdat"),
+         show_output_paths = FALSE)
+
+## ------------------------------------------------------------------------
+get_usage("saga:sagawetnessindex")
+run_qgis(alg = "saga:sagawetnessindex",
+         DEM = file.path(tempdir(), "sdem.sdat"),
+         SLOPE_TYPE = 1, 
+         SLOPE = file.path(tempdir(), "cslope.sdat"),
+         AREA = file.path(tempdir(), "carea.sdat"),
+         show_output_paths = FALSE)
+
+## ----eval = FALSE--------------------------------------------------------
+library("dplyr")
+library("raster")
+file.path(tempdir(), c("cslope.sdat", "carea.sdat")) %>%
+  raster::stack(.) %>%
+  plot
+
+## ----message = FALSE, error = FALSE, warning = FALSE---------------------
+library("raster")
+cslope <- raster(file.path(tempdir(), "cslope.sdat"))
+cslope <- cslope * 180 /pi
+
+## ------------------------------------------------------------------------
+carea <- raster(file.path(tempdir(), "carea.sdat"))
+log_carea <- log(carea / 1e+06)
+
+## ------------------------------------------------------------------------
+data("ndvi", package = "RQGIS")
+
+## ----eval = TRUE, cache = FALSE, message = FALSE, error = FALSE, warning = FALSE----
+data("dem", package = "RQGIS")
+dem <- dem / 1000
+my_poly <- poly(values(dem), degree = 2)
+dem1 <- dem2 <- dem
+values(dem1) <- my_poly[, 1]
+values(dem2) <- my_poly[, 2]
+for (i in c("dem1", "dem2", "log_carea", "cslope", "ndvi")) {
+  tmp <- crop(get(i), dem) 
+  writeRaster(x = tmp, 
+              filename = file.path(tempdir(), paste0(i, ".asc")), 
+              format = "ascii",
+              prj = TRUE,
+              overwrite = TRUE)  
+}
+
+## ----eval = TRUE, cache = FALSE, message = FALSE-------------------------
+library("dplyr")
+data("random_points", package = "RQGIS")
+random_points[, c("x", "y")] <- sf::st_coordinates(random_points)
+raster_names <- c("dem1", "dem2", "log_carea", "cslope", "ndvi")
+vals <- RSAGA::pick.from.ascii.grids(data = as.data.frame(random_points),
+                                     X.name = "x", 
+                                     Y.name = "y", 
+                                     file = file.path(tempdir(), raster_names),
+                                     varname = raster_names)
+dplyr::select(vals, -geometry) %>%
+  head(., 3)
+
+## ------------------------------------------------------------------------
+fit <- glm(formula = spri ~ dem1 + dem2 + cslope + ndvi + log_carea,
+           data = vals,
+           family = "poisson")
+
+## ----pred, eval = FALSE--------------------------------------------------
+library("sf")
+library("raster")
+raster_names <- c("dem1.asc", "dem2.asc", "log_carea.asc", "cslope.asc",
+                  "ndvi.asc")
+s <- stack(x = file.path(tempdir(), raster_names))
+pred <- predict(object = s,
+                model = fit,
+                fun = predict,
+                type = "response")
+pred <- crop(x = pred,
+             y = as(random_points, "Spatial"))
+# plot the output (shown in Figure 5)
+plot(pred)
+plot(st_geometry(random_points), add = TRUE)
+
+-->
